@@ -4,30 +4,54 @@ import java.net.URL
 import scala.annotation.tailrec
 
 object DraftKings {
-  case class Player(dkRank: Int, fpRank: Int, salary: Int, pos: String, name: String) {
+  case class Player(dkRank: Int, fpRank: Int, salary: Int, pos: String, name: String, fpp: Double) {
     override def toString = {
-      s"$name ... dk=$dkRank ... salary=$salary ... pos=$pos$fpRank"
+      s"$name ... dk=$dkRank ... salary=$salary ... pos=$pos$fpRank ... fpp=$fpp"
     }
+    val value = -fpp + (math.log(fpRank) / math.log(2)) * 2
   }
 
   val SalaryCap = 50000
   val Positions = Map(
     "QB" -> 1,
-    "RB" -> 3,
+    "RB" -> 2,
     "WR" -> 3,
     "TE" -> 1,
-    "DST" -> 1)
+    "DST" -> 1,
+    "FLEX" -> 1)
+
+  def getProjections(pos: String): Map[String, Double] = {
+    val f = new File(pos + "-proj")
+    if (!f.exists()) {
+      downloadFile(s"http://www.fantasypros.com/nfl/projections/$pos.php?export=xls&week=6", f)
+    }
+    val src = io.Source.fromFile(f)
+    val vs = src.getLines().drop(6).map { line =>
+      val v = line.split("\t").toVector
+      v.head -> v.last.toDouble
+    }.toMap
+    if (pos == "dst") {
+      vs.map { case (name, fps) =>
+        name.split(" ").last -> fps
+      }
+    } else {
+      vs
+    }
+  }
+
+  def downloadFile(url: String, f: File): Unit = {
+    val fw = new FileWriter(f)
+    val src = io.Source.fromURL(new URL(url))
+    src.foreach { c =>
+      fw.write(c)
+    }
+    fw.close()
+  }
 
   def getRanks(pos: String): Iterator[Vector[String]] = {
     val f = new File(pos)
     if (!f.exists()) {
-      val fw = new FileWriter(f)
-      val src = io.Source.fromURL(
-        new URL(s"http://www.fantasypros.com/nfl/rankings/$pos.php?export=xls"))
-      src.foreach { c =>
-        fw.write(c)
-      }
-      fw.close()
+      downloadFile(s"http://www.fantasypros.com/nfl/rankings/$pos.php?export=xls", f)
     }
     val src = io.Source.fromFile(f)
     val vs = src.getLines().drop(6).map { line =>
@@ -58,10 +82,9 @@ object DraftKings {
     // salaries
     // (Vector("Position","Name","Salary","GameInfo","AvgPointsPerGame","teamAbbrev"),"posRank")
 
-    val ranks = List("qb","te","wr","te","dst","rb").flatMap { pos =>
-      getRanks(pos)
-    }.map { v =>
-      v(1) -> v
+    val projections = List("qb","te","wr","te","dst","rb").flatMap(getProjections).toMap
+    val ranks = List("qb","te","wr","te","dst","rb").flatMap(getRanks).map {
+      case v => v(1) -> v
     }.toMap
 
     val salariesWithRanks = salaries.collect {
@@ -70,26 +93,26 @@ object DraftKings {
 
     val players = salariesWithRanks.map { case (rankV, salaryV, r) =>
       val v = (rankV ++ salaryV).map(_.trim)
-      Player(r, rankV.head.toInt, v(10).toInt, v(8), v(1))
+      Player(r, rankV.head.toInt, v(10).toInt, v(8), v(1), projections.getOrElse(v(1), 0d))
     }.toList
 
     val good = players.sortBy(_.dkRank).tails.collect {
       case p :: ps if ps.forall { p1 =>
         if (p.pos != p1.pos) true
-        else p1.fpRank > p.fpRank || p1.salary > p.salary
+        else p1.value > p.value || p1.salary > p.salary
       } => p
     }.toList
 
     val pool = good
       .groupBy(_.pos)
-      .map { case (pos, ps) => pos -> ps.sortBy(_.fpRank).take(Positions(pos) * 5) }
+      .map { case (pos, ps) => pos -> ps.sortBy(_.value).take(Positions(pos) * 5) }
 
     pool.foreach { case (pos, ps) =>
       println(pos + "\n--------------\n" + ps.mkString("\n") + "\n\n")
     }
 
     val optimalPicks: List[List[Player]] = {
-      val allPossiblePicks = Iterator.fill(100000)(Positions.toList.permutations).flatten.map { positions =>
+      val allPossiblePicks = Iterator.fill(100)(Positions.flatMap { case (pos, n) => List.fill(n)(pos) }.toList.permutations).flatten.map { positions =>
         makePicks(pool, positions, SalaryCap)
       }.collect { case Some(picks) =>
         picks
@@ -97,11 +120,11 @@ object DraftKings {
       if (allPossiblePicks.isEmpty) Nil
       else {
         val (bestRankSum, bestSalary, maybePicks) =
-          ((Double.MaxValue, Int.MaxValue, None: Option[List[Player]]) /: allPossiblePicks) { case ((bestRankSum, bestSalary, res), picks) =>
+          ((Double.MaxValue, Double.MaxValue, Nil: List[List[Player]]) /: allPossiblePicks) { case ((bestRankSum, bestSalary, res), picks) =>
           val salary = picks.map(_.salary).sum
-          val rankSum = picks.map(p => math.log(p.fpRank)).sum
+          val rankSum = picks.map(_.value).sum
           if (rankSum < bestRankSum) {
-            (rankSum, math.max(bestSalary, salary), Some(picks))
+            (rankSum, math.max(bestSalary, salary), picks :: res)
           } else {
             (bestRankSum, math.max(bestSalary, salary), res)
           }
@@ -118,20 +141,22 @@ object DraftKings {
 //          ps.map(p => math.log(p.fpRank)).sum == bestRankSum
 //        }
 
-        maybePicks.toList
+        maybePicks
       }
     }
     optimalPicks match {
       case Nil => println("Could not find any valid picks")
       case pickss =>
-        pickss.foreach(printPicks)
+        pickss.reverse.foreach(printPicks)
     }
   }
 
   def printPicks(picks: List[Player]): Unit = {
     println("PICKS\n=====")
     println("Remaining salary: " + (SalaryCap - picks.map(_.salary).sum))
-    println("Log rank sum: " + picks.map(p => math.log(p.fpRank)).sum)
+    println("Value sum: " + picks.map(_.value).sum)
+    println("Rank sum: " + picks.map(_.fpRank).sum)
+    println("Total FPP: " + picks.map(_.fpp).sum)
     List("QB", "RB", "WR", "TE", "DST").foreach { pos =>
       val ps = picks.filter(_.pos == pos)
       ps.sortBy(_.fpRank).foreach(println)
@@ -140,18 +165,19 @@ object DraftKings {
   }
 
   @tailrec
-  def makePicks(pool: Map[String, List[Player]], positions: List[(String, Int)], salaryRemaining: Int, picks: List[Player] = Nil): Option[List[Player]] = positions match {
+  def makePicks(pool: Map[String, List[Player]], positions: List[String], salaryRemaining: Int, picks: List[Player] = Nil): Option[List[Player]] = positions match {
     case Nil =>
       Some(picks)
-    case (pos, n) :: positions1 =>
-      val playersRemaining = positions.map(_._2).sum
+    case pos :: positions1 =>
+      val playersRemaining = positions.length
       val avgSalaryPerPlayer: Double = salaryRemaining.toDouble / playersRemaining
-      util.Random.shuffle(pool(pos)).find(p => p.salary <= avgSalaryPerPlayer) match {
+      val choices: List[Player] = if (pos == "FLEX") pool("RB") ++ pool("WR") ++ pool("TE") else pool(pos)
+      choices.filter(_ => util.Random.nextBoolean()).find(p => p.salary <= avgSalaryPerPlayer) match {
         case None =>
           None
         case Some(pick) =>
-          val newPool = pool.updated(pos, pool(pos).filterNot(_ == pick))
-          val newPositions = if (n == 1) positions.tail else positions.tail :+ (pos, n-1)
+          val newPool = pool.updated(pick.pos, pool(pick.pos).filterNot(_ == pick))
+          val newPositions = positions.tail
           makePicks(newPool, newPositions, salaryRemaining - pick.salary, pick :: picks)
       }
   }
