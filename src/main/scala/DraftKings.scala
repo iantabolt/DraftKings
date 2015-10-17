@@ -121,25 +121,25 @@ object DraftKings {
       else {
         val (bestRankSum, bestSalary, maybePicks) =
           ((Double.MaxValue, Double.MaxValue, Nil: List[List[Player]]) /: allPossiblePicks) { case ((bestRankSum, bestSalary, res), picks) =>
-          val salary = picks.map(_.salary).sum
-          val rankSum = picks.map(_.value).sum
-          if (rankSum < bestRankSum) {
-            (rankSum, math.max(bestSalary, salary), picks :: res)
-          } else {
-            (bestRankSum, math.max(bestSalary, salary), res)
+            val salary = picks.map(_.salary).sum
+            val rankSum = picks.map(_.value).sum
+            if (rankSum < bestRankSum) {
+              (rankSum, math.max(bestSalary, salary), picks :: res)
+            } else {
+              (bestRankSum, math.max(bestSalary, salary), res)
+            }
           }
-        }
         //        val app = allPossiblePicks.toList.map(_.toSet).distinct.map(_.toList)
-//        val bestSalary = app.map(_.map(_.salary).sum).max
-//        app.foreach(printPicks)
+        //        val bestSalary = app.map(_.map(_.salary).sum).max
+        //        app.foreach(printPicks)
         println("Optimal remaining salary: " + (SalaryCap - bestSalary))
-//        val bestRankSum = app.map(_.map(p => math.log(p.fpRank)).sum).min
+        //        val bestRankSum = app.map(_.map(p => math.log(p.fpRank)).sum).min
         println("Optimal rank sum: " + bestRankSum)
-//
-//        app.filter { ps =>
-//          //ps.map(_.salary).sum == bestSalary
-//          ps.map(p => math.log(p.fpRank)).sum == bestRankSum
-//        }
+        //
+        //        app.filter { ps =>
+        //          //ps.map(_.salary).sum == bestSalary
+        //          ps.map(p => math.log(p.fpRank)).sum == bestRankSum
+        //        }
 
         maybePicks
       }
